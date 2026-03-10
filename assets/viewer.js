@@ -73,7 +73,6 @@ document.getElementById('brightnessSlider').addEventListener('input', (e) => {
 });
 
 pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem;
 
 camera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
 camera.position.set(0.5, 0.5, 0.5);
@@ -286,6 +285,7 @@ function loadColorSet(entry, model) {
     return;
   }
   const colorPath = entry.colors;
+  const thisGeneration = loadGeneration;
 
   fetch(colorPath).then((res) => {
     if (!res.ok) {
@@ -295,7 +295,7 @@ function loadColorSet(entry, model) {
     }
     return res.json();
   }).then((colorSet) => {
-    if (!colorSet) return;
+    if (!colorSet || thisGeneration !== loadGeneration) return;
     currentColorSet = colorSet;
 
     applyColorSet(colorSet, model);
@@ -352,13 +352,30 @@ function loadColorSet(entry, model) {
   });
 }
 
+function disposeObject(obj) {
+  obj.traverse((child) => {
+    if (child.isMesh) {
+      child.geometry?.dispose();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of materials) {
+        if (!mat) continue;
+        for (const value of Object.values(mat)) {
+          if (value && value.isTexture) value.dispose();
+        }
+        mat.dispose();
+      }
+    }
+  });
+}
+
 function loadModel(id) {
   const entry = findModel(id);
   currentEntry = entry;
 
-  // Remove previous model
+  // Remove and dispose previous model
   if (currentModel) {
     scene.remove(currentModel);
+    disposeObject(currentModel);
     currentModel = null;
   }
 
@@ -389,6 +406,10 @@ function loadModel(id) {
     modelSize = box.getSize(new THREE.Vector3()).length();
     modelCenter = box.getCenter(new THREE.Vector3());
 
+    // Scale clipping planes to model size
+    camera.near = modelSize * 0.001;
+    camera.far = modelSize * 100;
+
     controls.target.copy(modelCenter);
     const direction = new THREE.Vector3();
     direction.subVectors(camera.position, controls.target).normalize();
@@ -401,7 +422,7 @@ function loadModel(id) {
     camera.up.set(0, 1, 0);
     camera.updateProjectionMatrix();   
 
-    buildTree(currentModel);
+    buildTree(currentModel, entry.name);
     loadColorSet(entry, currentModel);
     overlay.classList.add('hidden');
   }, (progress) => {
@@ -423,7 +444,7 @@ modelSelect.addEventListener('change', () => loadModel(modelSelect.value));
 // Load the initially selected model
 loadModel(modelSelect.value);
 
-function buildTree(sceneRoot) {
+function buildTree(sceneRoot, rootLabel) {
   unhighlightObject();
   const treeContainer = document.getElementById('tree');
   treeContainer.innerHTML = '';
@@ -466,7 +487,7 @@ function buildTree(sceneRoot) {
     // Object name — click to highlight in 3D view
     const label = document.createElement('span');
     label.className = 'tree-label';
-    label.textContent = obj.name || obj.type || 'Object';
+    label.textContent = (depth === 0 && rootLabel) ? rootLabel : (obj.name || obj.type || 'Object');
     label.addEventListener('click', (e) => {
       e.stopPropagation();
       if (selectedObj === obj) {

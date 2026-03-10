@@ -19,7 +19,7 @@ A browser-based 3D Viewer for CAD Assemblies, built with Three.js. Converts STEP
 - **Middle/right-drag** — Pan
 - **Scroll** — Zoom
 - **View buttons** (top-right) — Preset angles + zoom
-- **Scene hierarchy** (left sidebar) — Expand/collapse nodes, toggle visibility
+- **Scene hierarchy** (left sidebar) — Expand/collapse nodes, toggle visibility. The root node displays the model's `name` from `models.js`
 - **Color pickers** (left sidebar) — Change per-category part colors in real-time (when a color set file exists)
 
 ## Converting STEP to GLB
