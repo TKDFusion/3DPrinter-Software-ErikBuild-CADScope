@@ -8,6 +8,23 @@ import { DRACOLoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loader
 import { models } from '../models/models.js';
 
 const hdriLocation = "./assets/bg.hdr";
+const loadingPhrases = [
+  'Reticulating splines',
+  'Realigning the dilithium crystals',
+  'Downloading more RAM',
+  'Getting more DDR5 from the back of a truck',
+  'Bribing the hamsters',
+  'Summoning the ancient ones',
+  'Consulting the oracle',
+  'Sharpening the voxels',
+  'Asking Jeeves',
+  'Blowing on the cartridge',
+  'Synchronizing quantum entanglement buffers',
+  'Resolving cascading temporal anomalies',
+  'Almost done (lying)',
+  'This is taking longer than expected (it isn\u2019t)',
+  'Please enjoy this interstitial moment',
+];
 let scene, camera, renderer, controls, canvas, pmrem;
 
 const loadingManager = new THREE.LoadingManager();
@@ -99,6 +116,7 @@ gltfLoader.setDRACOLoader(dracoLoader);
 
 let currentModel = null;
 let currentEntry = null;
+let loadGeneration = 0;
 // Per-category state: category name -> array of meshes / color picker input
 const categoryMeshes = new Map();
 const categoryPickers = new Map();
@@ -341,7 +359,11 @@ function loadModel(id) {
   // Remove previous model
   if (currentModel) {
     scene.remove(currentModel);
+    currentModel = null;
   }
+
+  // Track load generation so stale callbacks are ignored
+  const thisGeneration = ++loadGeneration;
 
   // Update header GitHub link for this model's project
   updateGithubLink(entry);
@@ -353,9 +375,13 @@ function loadModel(id) {
   const overlay = document.getElementById('loadingOverlay');
   const loadingText = document.getElementById('loadingText');
   overlay.classList.remove('hidden');
-  loadingText.textContent = 'Loading model...';
+  const loadingPhrase = loadingPhrases[Math.floor(Math.random() * loadingPhrases.length)];
+  loadingText.textContent = loadingPhrase + '...';
 
   gltfLoader.load(entry.model, (gltf) => {
+    // A newer load was started — discard this result
+    if (thisGeneration !== loadGeneration) return;
+
     currentModel = gltf.scene;
     scene.add(currentModel);
 
@@ -380,8 +406,8 @@ function loadModel(id) {
     overlay.classList.add('hidden');
   }, (progress) => {
     if (progress.total) {
-      const pct = (progress.loaded / progress.total * 100).toFixed(0);
-      loadingText.textContent = `Loading model... ${pct}%`;
+      const pct = Math.min(100, progress.loaded / progress.total * 100).toFixed(0);
+      loadingText.textContent = `${loadingPhrase}... ${pct}%`;
     }
   }, (error) => {
     console.error('Error loading model:', error);
