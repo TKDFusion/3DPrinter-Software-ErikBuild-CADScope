@@ -24,37 +24,5 @@ export const models = [
     colors: "models/Positron_v3.2.2.colors.json",
     github: "https://github.com/Positron3D/Positron",
     github_text: "Positron V3.2.2 by Positron3D on GitHub"
-  },
-  {
-    id: "Prusawire_2026.R1",
-    name: "Prusawire 2026.R1",
-    model: "models/Prusawire_2026.R1.glb",
-    colors: "models/Prusawire_2026.R1.colors.json",
-    github: "https://github.com/Positron3D/Prusawire",
-    github_text: "Prusawire 2026.R1 by Positron3D on GitHub"
-  },
-  {
-    id: "Voron_0.2r1",
-    name: "Voron 0.2r1",
-    model: "models/Voron_0.2r1.glb",
-    colors: null,
-    github: "https://github.com/VoronDesign/Voron-0",
-    github_text: "Voron 0.2r1 by Voron Design Team on GitHub"
-  },
-  {
-    id: "Voron_2.4r2",
-    name: "Voron 2.4r2",
-    model: "models/Voron_2.4r2_250_ClickyClackyDoor.glb",
-    colors: "models/Voron_2.4r2_250_ClickyClackyDoor.colors.json",
-    github: "https://github.com/VoronDesign/Voron-2",
-    github_text: "Voron 2.4r2 by Voron Design Team on GitHub"
-  },
-  {
-    id: "Voron_Switchwire",
-    name: "Voron Switchwire",
-    model: "models/Voron_Switchwire.glb",
-    colors: null,
-    github: "https://github.com/VoronDesign/Voron-Switchwire",
-    github_text: "Voron Switchwire by Voron Design Team on GitHub"
   }
 ];
