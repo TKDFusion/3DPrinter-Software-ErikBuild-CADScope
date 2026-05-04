@@ -82,8 +82,14 @@
 
         <!-- Loading Indicator -->
         <div class="loading-indicator" id="loadingOverlay">
-          <div class="spinner-small"></div>
-          <span id="loadingText">Loading model...</span>
+          <div class="loading-line">
+            <div class="spinner-small"></div>
+            <span id="loadingText">Loading model...</span>
+          </div>
+          <div class="loading-line hidden" id="processingLine">
+            <div class="spinner-small"></div>
+            <span id="processingText"></span>
+          </div>
         </div>
 
         <!-- Attribution -->

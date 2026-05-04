@@ -467,6 +467,32 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 4px;
 }
 
+.tree-isolate-btn {
+  margin-left: auto;
+  opacity: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.tree-item-content:hover > .tree-isolate-btn {
+  opacity: 1;
+}
+
+.tree-isolate-btn:hover {
+  color: var(--accent);
+}
+
+.tree-item.isolated > .tree-item-content > .tree-isolate-btn {
+  opacity: 1;
+  color: var(--accent);
+}
+
 /* 3D Viewer */
 .viewer-container {
   flex: 1;
@@ -534,7 +560,7 @@ input[type="range"]::-moz-range-thumb {
   transform: translate(-50%, -50%);
   background: rgba(26, 26, 46, 0.9);
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-radius: 6px;
@@ -543,6 +569,16 @@ input[type="range"]::-moz-range-thumb {
   transition: opacity 0.3s;
   font-size: 0.875rem;
   color: var(--text-secondary);
+}
+
+.loading-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.loading-line.hidden {
+  display: none;
 }
 
 .loading-indicator.hidden {
