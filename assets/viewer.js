@@ -242,6 +242,18 @@ function stripNumericSuffix(name) {
   return name.replace(/-\d+$/, '');
 }
 
+function applyDefaultConfiguration(colorSet, model) {
+  const hiddenNames = new Set(colorSet?.defaultConfiguration?.hidden || []);
+  if (hiddenNames.size === 0) return;
+  model.traverse((obj) => {
+    const cleaned = cleanNodeName(obj.name);
+    const stripped = stripNumericSuffix(cleaned);
+    if (hiddenNames.has(cleaned) || hiddenNames.has(stripped)) {
+      obj.visible = false;
+    }
+  });
+}
+
 function applyColorSet(colorSet, model) {
   categoryMeshes.clear();
 
@@ -277,79 +289,59 @@ function applyColorSet(colorSet, model) {
   });
 }
 
-function loadColorSet(entry, model) {
+function fetchColorSet(entry) {
+  if (!entry.colors) return Promise.resolve(null);
+  return fetch(entry.colors)
+    .then((res) => res.ok ? res.json() : null)
+    .catch(() => null);
+}
+
+function buildColorPickerUI(colorSet) {
   const colorControls = document.getElementById('colorControls');
-  if (!entry.colors) {
-    colorControls.style.display = 'none';
-    updateURL();
-    return;
-  }
-  const colorPath = entry.colors;
-  const thisGeneration = loadGeneration;
+  colorControls.innerHTML = '';
+  categoryPickers.clear();
+  const heading = document.createElement('h3');
+  heading.textContent = 'Colors';
+  colorControls.appendChild(heading);
+  for (const [name, cat] of Object.entries(colorSet.categories)) {
+    if (cat.visible === false) continue;
 
-  fetch(colorPath).then((res) => {
-    if (!res.ok) {
-      colorControls.style.display = 'none';
-      updateURL();
-      return;
-    }
-    return res.json();
-  }).then((colorSet) => {
-    if (!colorSet || thisGeneration !== loadGeneration) return;
-    currentColorSet = colorSet;
+    const row = document.createElement('div');
+    row.className = 'color-row';
 
-    applyColorSet(colorSet, model);
+    const label = document.createElement('label');
+    label.textContent = name;
 
-    // Build color picker UI dynamically from categories
-    colorControls.innerHTML = '';
-    categoryPickers.clear();
-    const heading = document.createElement('h3');
-    heading.textContent = 'Colors';
-    colorControls.appendChild(heading);
-    for (const [name, cat] of Object.entries(colorSet.categories)) {
-      if (cat.visible === false) continue;
+    const picker = document.createElement('input');
+    picker.type = 'color';
+    picker.value = cat.color;
 
-      const row = document.createElement('div');
-      row.className = 'color-row';
-
-      const label = document.createElement('label');
-      label.textContent = name;
-
-      const picker = document.createElement('input');
-      picker.type = 'color';
-      picker.value = cat.color;
-
-      // Apply URL override on first load
-      if (!urlColorsConsumed && name !== 'model') {
-        const urlVal = urlParams.get(name);
-        if (urlVal) {
-          const override = '#' + urlVal;
-          picker.value = override;
-          const c = new THREE.Color(override);
-          (categoryMeshes.get(name) || []).forEach((mesh) => { mesh.material.color.copy(c); });
-        }
+    // Apply URL override on first load
+    if (!urlColorsConsumed && name !== 'model') {
+      const urlVal = urlParams.get(name);
+      if (urlVal) {
+        const override = '#' + urlVal;
+        picker.value = override;
+        const c = new THREE.Color(override);
+        (categoryMeshes.get(name) || []).forEach((mesh) => { mesh.material.color.copy(c); });
       }
-
-      picker.addEventListener('input', () => {
-        const c = new THREE.Color(picker.value);
-        const meshes = categoryMeshes.get(name) || [];
-        meshes.forEach((mesh) => { mesh.material.color.copy(c); });
-        updateURL();
-      });
-
-      row.appendChild(label);
-      row.appendChild(picker);
-      colorControls.appendChild(row);
-      categoryPickers.set(name, picker);
     }
 
-    urlColorsConsumed = true;
-    colorControls.style.display = '';
-    updateURL();
-  }).catch(() => {
-    colorControls.style.display = 'none';
-    updateURL();
-  });
+    picker.addEventListener('input', () => {
+      const c = new THREE.Color(picker.value);
+      const meshes = categoryMeshes.get(name) || [];
+      meshes.forEach((mesh) => { mesh.material.color.copy(c); });
+      updateURL();
+    });
+
+    row.appendChild(label);
+    row.appendChild(picker);
+    colorControls.appendChild(row);
+    categoryPickers.set(name, picker);
+  }
+
+  urlColorsConsumed = true;
+  colorControls.style.display = '';
 }
 
 function disposeObject(obj) {
@@ -422,9 +414,23 @@ function loadModel(id) {
     camera.up.set(0, 1, 0);
     camera.updateProjectionMatrix();   
 
-    buildTree(currentModel, entry.name);
-    loadColorSet(entry, currentModel);
-    overlay.classList.add('hidden');
+    fetchColorSet(entry).then((colorSet) => {
+      if (thisGeneration !== loadGeneration) return;
+      const colorControls = document.getElementById('colorControls');
+      if (colorSet) {
+        currentColorSet = colorSet;
+        applyDefaultConfiguration(colorSet, currentModel);
+        applyColorSet(colorSet, currentModel);
+        buildTree(currentModel, entry.name);
+        buildColorPickerUI(colorSet);
+      } else {
+        currentColorSet = null;
+        buildTree(currentModel, entry.name);
+        colorControls.style.display = 'none';
+      }
+      updateURL();
+      overlay.classList.add('hidden');
+    });
   }, (progress) => {
     if (progress.total) {
       const pct = Math.min(100, progress.loaded / progress.total * 100).toFixed(0);

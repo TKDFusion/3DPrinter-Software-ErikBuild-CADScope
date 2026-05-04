@@ -15,6 +15,17 @@
  *   colors      - Path to the .colors.json file, or null if none
  *   github      - URL to the project's GitHub repo, or null
  *   github_text - Link text for the GitHub link, or null
+ *
+ * .colors.json sidecar format:
+ *   {
+ *     "categories": { ... color groups, each with parts[] ... },
+ *     "defaultConfiguration": {              // optional
+ *       "hidden": ["NodeName1", "NodeName2"] // tree nodes unchecked on load
+ *     }
+ *   }
+ *   Names in `hidden` match the same way as `categories.parts`: cleaned
+ *   node name, with a fallback that strips a trailing -N numeric suffix.
+ *   Hiding a group node hides all of its descendants in the 3D view.
  */
 export const models = [
   {
