@@ -1,6 +1,6 @@
 # CADScope
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Three.js](https://img.shields.io/badge/Three.js-0.161.0-black)
 ![Platform](https://img.shields.io/badge/platform-browser-orange)
@@ -20,6 +20,7 @@ A browser-based 3D Viewer for CAD Assemblies, built with Three.js. Converts STEP
 - **Scroll** — Zoom
 - **View buttons** (top-right) — Preset angles + zoom
 - **Scene hierarchy** (left sidebar) — Expand/collapse nodes, toggle visibility. The root node displays the model's `name` from `models.js`
+- **Isolate button** (⊚, hover a tree row) — Hides everything except the clicked node and its ancestors/descendants; click again to restore
 - **Color pickers** (left sidebar) — Change per-category part colors in real-time (when a color set file exists)
 
 ## Converting STEP to GLB
@@ -92,6 +93,9 @@ Create a JSON file next to the GLB, named `{model}.colors.json`:
       "color": "#00AAFF",
       "parts": ["PartNameC", "PartNameD"]
     }
+  },
+  "defaultConfiguration": {
+    "hidden": ["PartNameB", "SomeAssemblyGroup"]
   }
 }
 ```
@@ -101,6 +105,10 @@ Add as many categories as you need — each one gets its own color picker in the
 For example, `models/Positron_v3.2.2.glb` looks for `models/Positron_v3.2.2.colors.json`.
 
 Part names should match what you see in the sidebar hierarchy. The viewer uses the same name-cleaning logic as the conversion pipeline (strips path prefixes, `.step` suffixes, `(mesh)`/`(group)` suffixes) and will also try matching with trailing numeric suffixes (`-1`, `-2`, etc.) stripped, then fall back to the parent node name.
+
+### Default Configuration (optional)
+
+Listing names under `defaultConfiguration.hidden` makes those tree nodes start with their visibility checkbox unchecked (and their geometry hidden) when the model loads. Names are matched the same way as `categories.parts`: cleaned node name first, then a fallback that strips a trailing `-N` numeric suffix. Listing a group node hides its entire subtree in the 3D view; the user can still toggle individual children on with the tree checkboxes.
 
 ## Future Possibilities...
 
