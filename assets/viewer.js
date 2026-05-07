@@ -6,6 +6,13 @@ import { RGBELoader } from "https://unpkg.com/three@0.164.1/examples/jsm/loaders
 import { GLTFLoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'https://unpkg.com/three@0.164.1/examples/jsm/loaders/DRACOLoader.js';
 import { models } from '../models/models.js';
+import {
+  writeShareToParams,
+  readShareFromParams,
+  walkNodes,
+  paletteName,
+  collectColorOverrides,
+} from './cadscope_state.js';
 
 const hdriLocation = "./assets/bg.hdr";
 const loadingPhrases = [
@@ -178,18 +185,62 @@ function updateGithubLink(entry) {
   }
 }
 
-// URL query string support
+// URL query string support. ?model=ID stays plain-text for readability;
+// share state goes into one URL param per non-default field
+// (?c=<colors>&h=<hidden>&i=<isolate>) via the share-link codec.
 function updateURL() {
   const params = new URLSearchParams();
   params.set('model', currentEntry ? currentEntry.id : models[0].id);
-  if (document.getElementById('colorControls').style.display !== 'none') {
-    for (const [name, picker] of categoryPickers) {
-      if (name !== 'model') {
-        params.set(name, picker.value.slice(1));
-      }
-    }
+  if (currentLookups) {
+    const pickerValues = new Map();
+    for (const [name, picker] of categoryPickers) pickerValues.set(name, picker.value);
+    const colorOverrides = collectColorOverrides(currentLookups, pickerValues);
+    const isolatedNode = isolatedObj ? indexOfNode(isolatedObj) : null;
+    // Skip hidden-state diffing while isolated — isolate clobbers visibility
+    // on every off-chain node, which would explode the encoded URL.
+    const hiddenNodes = isolatedObj ? [] : collectHiddenIndices();
+    const shareState = {};
+    if (colorOverrides.length) shareState.colorOverrides = colorOverrides;
+    if (hiddenNodes.length)    shareState.hiddenNodes    = hiddenNodes;
+    if (isolatedNode != null && isolatedNode >= 0) shareState.isolatedNode = isolatedNode;
+    writeShareToParams(shareState, params);
   }
   history.replaceState(null, '', '?' + params.toString());
+}
+
+// Diff live node visibility against the sidecar's defaultConfiguration.
+function collectHiddenIndices() {
+  if (!currentModel || !currentLookups) return [];
+  const out = [];
+  const nodes = walkNodes(currentModel);
+  // Build a path-of-node helper using the same extendPath logic as buildTree.
+  const root = visualRoot(currentModel);
+  const cache = new WeakMap();
+  function pathOf(obj) {
+    if (cache.has(obj)) return cache.get(obj);
+    let p = '';
+    if (obj.parent && obj.parent !== root) p = pathOf(obj.parent);
+    p = extendPath(p, obj.name);
+    cache.set(obj, p);
+    return p;
+  }
+  nodes.forEach((node, idx) => {
+    const entry = lookupNode(currentLookups, pathOf(node));
+    const sidecarHidden = entry?.hidden === true;
+    const liveHidden = node.visible === false;
+    if (liveHidden !== sidecarHidden) out.push(idx);
+  });
+  return out;
+}
+
+function indexOfNode(obj) {
+  if (!currentModel) return -1;
+  return walkNodes(currentModel).indexOf(obj);
+}
+
+function nodeAtIndex(idx) {
+  if (!currentModel || idx == null || idx < 0) return null;
+  return walkNodes(currentModel)[idx] || null;
 }
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -197,7 +248,19 @@ const urlModel = urlParams.get('model');
 if (urlModel && models.some(m => m.id === urlModel)) {
   modelSelect.value = urlModel;
 }
-// URL color overrides are consumed once on initial load, then cleared
+// Decode share state once at startup; `applySharedState` consumes it after
+// the model has loaded and the tree is built. readShareFromParams returns
+// {} when there are no codec params; null when present-but-malformed.
+let pendingShareState = readShareFromParams(urlParams);
+if (pendingShareState === null) {
+  console.warn('Share-link payload is malformed. Ignoring.');
+  pendingShareState = {};
+}
+// Tracked separately because `{}` is truthy — used by the legacy color-param
+// fallback path to know whether codec params were actually provided.
+const codecParamsPresent = Object.keys(pendingShareState).length > 0;
+// Legacy back-compat (one release): old per-category color params like
+// ?Main=ff6600 still apply if no `?c=` is present.
 let urlColorsConsumed = false;
 
 // Populate URL immediately with current model selection
@@ -434,8 +497,10 @@ function buildColorPickerUI(lookups) {
     picker.type = 'color';
     picker.value = entry.color;
 
-    // Apply URL override on first load
-    if (!urlColorsConsumed && name !== 'model') {
+    // Legacy back-compat: apply old-style ?Category=hex params on first load,
+    // but only when no codec params were supplied. The codec path runs as
+    // applySharedColors after this function returns and would override anyway.
+    if (!urlColorsConsumed && !codecParamsPresent && name !== 'model') {
       const urlVal = urlParams.get(name);
       if (urlVal) {
         const override = '#' + urlVal;
@@ -542,14 +607,16 @@ function loadModel(id) {
         currentLookups = buildSidecarLookups(colorSet);
         applyDefaultConfiguration(currentLookups, currentModel);
         applyColorSet(currentLookups, currentModel);
-        buildTree(currentModel, entry.name);
+        buildTree(currentModel, entry.name, pendingShareState);
         buildColorPickerUI(currentLookups);
+        applySharedColors(pendingShareState);
       } else {
         currentColorSet = null;
         currentLookups = null;
-        buildTree(currentModel, entry.name);
+        buildTree(currentModel, entry.name, pendingShareState);
         colorControls.style.display = 'none';
       }
+      pendingShareState = null;
       updateURL();
       overlay.classList.add('hidden');
     });
@@ -576,7 +643,21 @@ modelSelect.addEventListener('change', () => loadModel(modelSelect.value));
 // Load the initially selected model
 loadModel(modelSelect.value);
 
-function buildTree(sceneRoot, rootLabel) {
+// Applies pending share-state color overrides after the picker UI is built.
+function applySharedColors(state) {
+  if (!state?.colorOverrides || !currentLookups) return;
+  for (const [paletteIdx, hex6] of state.colorOverrides) {
+    const name = paletteName(currentLookups, paletteIdx);
+    if (!name) continue;
+    const fullHex = '#' + hex6;
+    const picker = categoryPickers.get(name);
+    if (picker) picker.value = fullHex;
+    const c = new THREE.Color(fullHex);
+    (categoryMeshes.get(name) || []).forEach((mesh) => mesh.material.color.copy(c));
+  }
+}
+
+function buildTree(sceneRoot, rootLabel, pendingState) {
   unhighlightObject();
   isolatedObj = null;
   isolatedTreeItem = null;
@@ -664,6 +745,7 @@ function buildTree(sceneRoot, rootLabel) {
     }
 
     setVisibility(root);
+    updateURL();
   }
 
   function unisolateAll() {
@@ -682,6 +764,7 @@ function buildTree(sceneRoot, rootLabel) {
     }
 
     restoreVisibility(root);
+    updateURL();
   }
 
   function createTreeItem(obj, parentElement, depth = 0) {
@@ -712,6 +795,7 @@ function buildTree(sceneRoot, rootLabel) {
       } else {
         itemDiv.classList.add('hidden');
       }
+      updateURL();
     });
     contentDiv.appendChild(checkbox);
     itemDiv._checkbox = checkbox;
@@ -777,6 +861,29 @@ function buildTree(sceneRoot, rootLabel) {
   }
 
   createTreeItem(root, treeContainer);
+
+  // Apply pending share state — hidden visibility flips and isolated node.
+  // Color overrides are applied separately after buildColorPickerUI runs.
+  if (pendingState) {
+    const allNodes = walkNodes(sceneRoot);
+    if (Array.isArray(pendingState.hiddenNodes)) {
+      for (const idx of pendingState.hiddenNodes) {
+        const node = allNodes[idx];
+        if (!node) continue;
+        // Flip visibility from sidecar default. The collect side emits indices
+        // where live differs from sidecar — flipping here recreates the saved
+        // state on top of the sidecar's already-applied default.
+        node.visible = !node.visible;
+        const item = objToTreeItem.get(node);
+        if (item) syncTreeItemVisibility(item, node.visible);
+      }
+    }
+    if (pendingState.isolatedNode != null) {
+      const node = allNodes[pendingState.isolatedNode];
+      const item = node ? objToTreeItem.get(node) : null;
+      if (node && item) isolateNode(node, item);
+    }
+  }
 }
 
 // Scene tree search — filters and highlights matching nodes

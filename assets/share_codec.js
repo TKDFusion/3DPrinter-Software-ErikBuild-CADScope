@@ -96,6 +96,10 @@ function* candidates(spec, src, i) {
       yield* candidates(spec.of, src, i);
       return;
     }
+    case 'composite': {
+      yield* composeParts(spec.parts, src, i, i, []);
+      return;
+    }
     case 'list': {
       // Format: <count-base36>(<sep><item>){count}
       // Separator '-' between items gives unambiguous splitting even when the
@@ -135,6 +139,24 @@ function* candidates(spec, src, i) {
 }
 
 const LIST_ITEM_SEP = '-';
+const COMPOSITE_PART_SEP = ':';
+
+function* composeParts(parts, src, start, j, accum) {
+  if (accum.length === parts.length) {
+    yield [accum, j - start];
+    return;
+  }
+  const isLast = accum.length === parts.length - 1;
+  const partSpec = parts[accum.length];
+  for (const [value, consumed] of candidates(partSpec, src, j)) {
+    const after = j + consumed;
+    if (isLast) {
+      yield* composeParts(parts, src, start, after, [...accum, value]);
+    } else if (src[after] === COMPOSITE_PART_SEP) {
+      yield* composeParts(parts, src, start, after + 1, [...accum, value]);
+    }
+  }
+}
 
 const BASE36_CHAR = /[0-9a-z]/i;
 const HEX6_CHAR   = /^[0-9a-f]{6}$/;
@@ -173,8 +195,57 @@ function encodeField(value, spec) {
       return arr.length.toString(36)
         + arr.map(v => `${LIST_ITEM_SEP}${encodeField(v, spec.of)}`).join('');
     }
+    case 'composite': {
+      const arr = Array.isArray(value) ? value : [];
+      if (arr.length !== spec.parts.length) {
+        throw new SchemaError(`Composite ${spec.name} expects ${spec.parts.length} parts, got ${arr.length}`);
+      }
+      return spec.parts.map((p, i) => encodeField(arr[i], p)).join(COMPOSITE_PART_SEP);
+    }
   }
   throw new SchemaError(`Unknown field type: ${spec.type}`);
+}
+
+// --- Multi-param (per-field) mode ---
+//
+// Returns a plain object { tag: encodedValue } so the caller can fold each
+// field into a separate URL query parameter. Defaults are skipped exactly the
+// same way as the tagged form.
+
+export function encodeFields(state, schema) {
+  const out = {};
+  for (const f of schema.fields) {
+    const v = state[f.name];
+    if (isAtDefault(v, f)) continue;
+    out[tagOf(f)] = encodeField(v, f);
+  }
+  return out;
+}
+
+// Inverse: takes a { tag: encodedValue } map and produces a state object.
+// Unknown tag, malformed value, or non-object input → null.
+
+export function decodeFields(map, schema) {
+  try {
+    if (map == null || typeof map !== 'object' || Array.isArray(map)) return null;
+    const fieldsByTag = Object.fromEntries(schema.fields.map(f => [tagOf(f), f]));
+    const out = {};
+    for (const [tag, valStr] of Object.entries(map)) {
+      const f = fieldsByTag[tag];
+      if (!f) return null;
+      if (typeof valStr !== 'string') return null;
+      let found = false; let matched;
+      for (const [value, consumed] of candidates(f, valStr, 0)) {
+        if (consumed === valStr.length) { matched = value; found = true; break; }
+      }
+      if (!found) return null;
+      out[f.name] = matched;
+    }
+    return out;
+  } catch (e) {
+    if (e instanceof SchemaError) throw e;
+    return null;
+  }
 }
 
 // --- Tagged ---

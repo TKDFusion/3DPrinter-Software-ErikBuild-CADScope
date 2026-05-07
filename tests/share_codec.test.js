@@ -4,7 +4,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { encode, decode } from '../assets/share_codec.js';
+import { encode, decode, encodeFields, decodeFields } from '../assets/share_codec.js';
+import {
+  CADSCOPE_SCHEMA,
+  writeShareToParams,
+  readShareFromParams,
+  walkNodes,
+  paletteIndex,
+  paletteName,
+  collectColorOverrides,
+} from '../assets/cadscope_state.js';
 
 const SINGLE_ENUM_SCHEMA = {
   version: 1,
@@ -297,6 +306,181 @@ function mulberry32(seed) {
     return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+// --- composite ---
+
+const COMPOSITE_SCHEMA = {
+  version: 1,
+  encoding: 'positional',
+  fields: [
+    {
+      type: 'composite', name: 'pair',
+      parts: [
+        { type: 'int', min: 0, max: 35 },
+        { type: 'hex6' },
+      ],
+    },
+  ],
+};
+
+test('composite: pair (int, hex6) round-trips with : separator', () => {
+  const state = { pair: [3, 'ff6600'] };
+  assert.equal(encode(state, COMPOSITE_SCHEMA), 'v1.3:ff6600');
+  assert.deepEqual(decode('v1.3:ff6600', COMPOSITE_SCHEMA), state);
+});
+
+test('composite: list of pairs', () => {
+  const schema = {
+    version: 1,
+    encoding: 'tagged',
+    fields: [
+      {
+        type: 'list', name: 'overrides', tag: 'c',
+        of: {
+          type: 'composite',
+          parts: [
+            { type: 'int', min: 0, max: 35 },
+            { type: 'hex6' },
+          ],
+        },
+      },
+    ],
+  };
+  const state = { overrides: [[0, 'ff6600'], [3, '00aaff']] };
+  assert.equal(encode(state, schema), 'v1.c=2-0:ff6600-3:00aaff');
+  assert.deepEqual(decode('v1.c=2-0:ff6600-3:00aaff', schema), state);
+});
+
+test('composite: bad inner part returns null on decode', () => {
+  assert.equal(decode('v1.3:zzzzzz', COMPOSITE_SCHEMA), null);   // not hex
+  assert.equal(decode('v1.36:ff6600', COMPOSITE_SCHEMA), null);  // int > 35
+  assert.equal(decode('v1.3ff6600', COMPOSITE_SCHEMA), null);    // missing :
+});
+
+// --- multi-param (per-field) mode ---
+
+test('encodeFields: returns tag→encoded-string map, defaults skipped', () => {
+  const fields = encodeFields(
+    { material: 'sheet_metal', gantry: 'fixed', xRail: 350, hidden: [3], isolated: null },
+    TAGGED_SCHEMA,
+  );
+  // gantry & xRail are at default → omitted; isolated is null → omitted.
+  assert.deepEqual(fields, { m: 's', h: '1-3' });
+});
+
+test('encodeFields: empty state returns empty object', () => {
+  assert.deepEqual(encodeFields({}, TAGGED_SCHEMA), {});
+});
+
+test('decodeFields: round-trip from a tag→string map', () => {
+  const state = decodeFields({ m: 's', h: '1-3', i: '8' }, TAGGED_SCHEMA);
+  assert.deepEqual(state, { material: 'sheet_metal', hidden: [3], isolated: 8 });
+});
+
+test('decodeFields: unknown tag returns null', () => {
+  assert.equal(decodeFields({ q: 'whatever' }, TAGGED_SCHEMA), null);
+});
+
+test('decodeFields: bad value for known tag returns null', () => {
+  assert.equal(decodeFields({ m: 'q' }, TAGGED_SCHEMA), null);    // unknown enum
+  assert.equal(decodeFields({ x: '1' }, TAGGED_SCHEMA), null);    // out of range
+});
+
+test('decodeFields: never throws on garbage', () => {
+  for (const bad of [null, undefined, 'not an object', [], 42]) {
+    assert.doesNotThrow(() => decodeFields(bad, TAGGED_SCHEMA));
+  }
+});
+
+// --- CADScope schema ---
+
+test('cadscope: empty share state writes no params', () => {
+  const params = new URLSearchParams('model=Positron');
+  writeShareToParams({}, params);
+  assert.equal(params.toString(), 'model=Positron');
+  assert.deepEqual(readShareFromParams(params), {});
+});
+
+test('cadscope: typical share state round-trips through URL params', () => {
+  const state = {
+    colorOverrides: [[0, 'ff6600'], [3, '00aaff']],
+    hiddenNodes:    [3, 7, 12, 45],
+    isolatedNode:   8,
+  };
+  const params = new URLSearchParams('model=Positron');
+  writeShareToParams(state, params);
+  assert.deepEqual(
+    Object.fromEntries(params),
+    { model: 'Positron', c: '2-0:ff6600-3:00aaff', h: '4-3-7-c-19', i: '8' },
+  );
+  assert.deepEqual(readShareFromParams(params), state);
+});
+
+test('cadscope: only hidden node — URL has h= and nothing else', () => {
+  const params = new URLSearchParams('model=Positron');
+  writeShareToParams({ hiddenNodes: [966] }, params);
+  // 966 in base-36 is "qu"
+  assert.equal(params.toString(), 'model=Positron&h=1-qu');
+  assert.deepEqual(readShareFromParams(params), { hiddenNodes: [966] });
+});
+
+test('cadscope: re-encoding strips stale share params before writing', () => {
+  // Simulate going from "hidden + isolated" back to just "hidden".
+  const params = new URLSearchParams('model=Positron&c=1-0:ff6600&h=1-3&i=8');
+  writeShareToParams({ hiddenNodes: [3] }, params);
+  // c and i should be gone; only model + h remain.
+  assert.equal(params.toString(), 'model=Positron&h=1-3');
+});
+
+test('cadscope: malformed param returns null from readShareFromParams', () => {
+  const params = new URLSearchParams('model=Positron&h=garbage');
+  assert.equal(readShareFromParams(params), null);
+});
+
+test('cadscope: walkNodes flattens the tree depth-first, skipping Scene wrapper', () => {
+  // Synthetic tree mimicking gltf's Scene root with two top-level children.
+  const a = { name: 'A', children: [] };
+  const b1 = { name: 'B1', children: [] };
+  const b2 = { name: 'B2', children: [] };
+  const b = { name: 'B', children: [b1, b2] };
+  const root = { name: 'Scene', children: [{ name: 'visual', children: [a, b] }] };
+  // walkNodes should hit the visual root's children: A, B, B1, B2 (in that order).
+  const order = walkNodes(root).map(n => n.name);
+  assert.deepEqual(order, ['A', 'B', 'B1', 'B2']);
+});
+
+test('cadscope: paletteIndex / paletteName round-trip in insertion order', () => {
+  const lookups = {
+    palette: new Map([
+      ['Main',   { color: '#FF6600' }],
+      ['Accent', { color: '#00AAFF' }],
+      ['Frame',  { color: '#222222' }],
+    ]),
+  };
+  assert.equal(paletteIndex(lookups, 'Main'),   0);
+  assert.equal(paletteIndex(lookups, 'Accent'), 1);
+  assert.equal(paletteIndex(lookups, 'Frame'),  2);
+  assert.equal(paletteIndex(lookups, 'Missing'), -1);
+  assert.equal(paletteName(lookups, 0), 'Main');
+  assert.equal(paletteName(lookups, 2), 'Frame');
+  assert.equal(paletteName(lookups, 99), null);
+});
+
+test('cadscope: collectColorOverrides emits only changed entries', () => {
+  const lookups = {
+    palette: new Map([
+      ['Main',   { color: '#ff6600' }],
+      ['Accent', { color: '#00aaff' }],
+      ['Frame',  { color: '#222222' }],
+    ]),
+  };
+  const live = new Map([
+    ['Main',   '#ff6600'],   // unchanged
+    ['Accent', '#FF00FF'],   // changed
+    ['Frame',  '#222222'],   // unchanged
+  ]);
+  assert.deepEqual(collectColorOverrides(lookups, live), [[1, 'ff00ff']]);
+});
 
 test('round-trip: malformed inputs never throw', () => {
   const bads = [
