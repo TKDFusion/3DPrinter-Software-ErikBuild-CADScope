@@ -91,17 +91,96 @@ controls.enableDamping = true;
 // Render-on-demand: schedule one render per animation frame; OrbitControls
 // fires 'change' synchronously inside controls.update() while damping is
 // settling, so the natural feedback loop quiesces when the camera stops.
+// During an in-flight camera animation, controls.update() is skipped so the
+// damping decay doesn't fight the lerp.
 let renderQueued = false;
+let cameraAnimation = null;     // { from, to, startedAt, duration }
+let defaultView = null;         // { position, quaternion, up, target } — captured per loadModel
+const ANIM_DEFAULT = 600;       // view-button transitions
+const ANIM_ZOOM    = 250;       // zoom / resetZoom
+const ANIM_FIT     = 800;       // isolate-fit
+
 function requestRender() {
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(() => {
     renderQueued = false;
-    controls.update();
+    const stillAnimating = tickCameraAnimation();
+    if (!stillAnimating) controls.update();
     renderer.render(scene, camera);
+    if (stillAnimating) requestRender();
   });
 }
 controls.addEventListener('change', requestRender);
+
+function animateCameraTo(target, duration = ANIM_DEFAULT) {
+  cameraAnimation = {
+    from: {
+      position:   camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      up:         camera.up.clone(),
+      target:     controls.target.clone(),
+    },
+    to: target,
+    startedAt: performance.now(),
+    duration,
+  };
+  controls.enabled = false;
+  requestRender();
+}
+
+function tickCameraAnimation() {
+  if (!cameraAnimation) return false;
+  const t = Math.min(1, (performance.now() - cameraAnimation.startedAt) / cameraAnimation.duration);
+  const eased = t * t * (3 - 2 * t);
+  const { from, to } = cameraAnimation;
+  camera.position.lerpVectors(from.position, to.position, eased);
+  camera.quaternion.slerpQuaternions(from.quaternion, to.quaternion, eased);
+  camera.up.lerpVectors(from.up, to.up, eased);
+  controls.target.copy(from.target).lerp(to.target, eased);
+  camera.updateProjectionMatrix();
+  if (t >= 1) {
+    cameraAnimation = null;
+    controls.enabled = true;
+    return false;
+  }
+  return true;
+}
+
+// Build a target pose looking at modelCenter from a given direction at the
+// canonical model-fit distance. Used by all axis-view buttons.
+function poseFromDirection(direction, up) {
+  const distance = modelSize * 1.5;
+  const eye = modelCenter.clone().addScaledVector(direction.clone().normalize(), distance);
+  const m = new THREE.Matrix4().lookAt(eye, modelCenter, up);
+  return {
+    position:   eye,
+    quaternion: new THREE.Quaternion().setFromRotationMatrix(m),
+    up:         up.clone(),
+    target:     modelCenter.clone(),
+  };
+}
+
+// Animate the camera to frame an isolated subtree. Keeps the user's current
+// viewing direction; just translates so the subtree's bounding sphere fills
+// the FOV with a small padding margin.
+function fitCameraToSubtree(obj) {
+  if (!obj) return;
+  const sphere = new THREE.Sphere();
+  new THREE.Box3().setFromObject(obj).getBoundingSphere(sphere);
+  if (!(sphere.radius > 0)) return;
+  const dir = camera.position.clone().sub(controls.target).normalize();
+  const fovRad = camera.fov * Math.PI / 180;
+  const distance = (sphere.radius * 1.6) / Math.tan(fovRad / 2);
+  const eye = sphere.center.clone().addScaledVector(dir, distance);
+  const m = new THREE.Matrix4().lookAt(eye, sphere.center, camera.up);
+  animateCameraTo({
+    position:   eye,
+    quaternion: new THREE.Quaternion().setFromRotationMatrix(m),
+    up:         camera.up.clone(),
+    target:     sphere.center.clone(),
+  }, ANIM_FIT);
+}
 
 // Store model bounds globally for view controls
 let modelCenter = new THREE.Vector3();
@@ -618,7 +697,19 @@ function loadModel(id) {
     );
     camera.lookAt(modelCenter);
     camera.up.set(0, 1, 0);
-    camera.updateProjectionMatrix();   
+    camera.updateProjectionMatrix();
+
+    // Snapshot the rest pose so the Home view animates back to *this* exact
+    // pose instead of recomputing one. Recaptured on every model load so
+    // model swaps work correctly.
+    cameraAnimation = null;
+    controls.enabled = true;
+    defaultView = {
+      position:   camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      up:         camera.up.clone(),
+      target:     controls.target.clone(),
+    };
 
     fetchColorSet(entry).then((colorSet) => {
       if (thisGeneration !== loadGeneration) return;
@@ -768,6 +859,7 @@ function buildTree(sceneRoot, rootLabel, pendingState) {
 
     setVisibility(root);
     updateURL();
+    fitCameraToSubtree(obj);
     requestRender();
   }
 
@@ -985,79 +1077,52 @@ function filterTree(query) {
   });
 }
 
-// View control function
+// View control function — animates the camera to a canonical pose for the
+// requested axis. Home returns to the rest pose captured at model load.
+const Y_UP   = new THREE.Vector3(0, 1, 0);
+const Z_BACK = new THREE.Vector3(0, 0, -1);
+const Z_FWD  = new THREE.Vector3(0, 0, 1);
 window.setView = function(view) {
-  const distance = modelSize * 1.5;
-  controls.target.copy(modelCenter);
-
-  switch(view) {
-    case 'top':
-      camera.position.set(modelCenter.x, modelCenter.y + distance, modelCenter.z);
-      camera.up.set(0, 0, -1);
-      break;
-    case 'bottom':
-      camera.position.set(modelCenter.x, modelCenter.y - distance, modelCenter.z);
-      camera.up.set(0, 0, 1);
-      break;
-    case 'front':
-      camera.position.set(modelCenter.x, modelCenter.y, modelCenter.z + distance);
-      camera.up.set(0, 1, 0);
-      break;
-    case 'back':
-      camera.position.set(modelCenter.x, modelCenter.y, modelCenter.z - distance);
-      camera.up.set(0, 1, 0);
-      break;
-    case 'right':
-      camera.position.set(modelCenter.x + distance, modelCenter.y, modelCenter.z);
-      camera.up.set(0, 1, 0);
-      break;
-    case 'left':
-      camera.position.set(modelCenter.x - distance, modelCenter.y, modelCenter.z);
-      camera.up.set(0, 1, 0);
-      break;
+  switch (view) {
+    case 'top':    animateCameraTo(poseFromDirection(new THREE.Vector3(0,  1, 0), Z_BACK)); break;
+    case 'bottom': animateCameraTo(poseFromDirection(new THREE.Vector3(0, -1, 0), Z_FWD));  break;
+    case 'front':  animateCameraTo(poseFromDirection(new THREE.Vector3(0,  0, 1), Y_UP));   break;
+    case 'back':   animateCameraTo(poseFromDirection(new THREE.Vector3(0,  0,-1), Y_UP));   break;
+    case 'right':  animateCameraTo(poseFromDirection(new THREE.Vector3(1,  0, 0), Y_UP));   break;
+    case 'left':   animateCameraTo(poseFromDirection(new THREE.Vector3(-1, 0, 0), Y_UP));   break;
     case 'home':
-      camera.position.set(
-        modelCenter.x + modelSize,
-        modelCenter.y + modelSize,
-        modelCenter.z + modelSize
-      );
-      camera.up.set(0, 1, 0);
+      if (defaultView) animateCameraTo(defaultView);
+      else animateCameraTo(poseFromDirection(new THREE.Vector3(1, 1, 1), Y_UP));
       break;
   }
-
-  camera.lookAt(modelCenter);
-  camera.updateProjectionMatrix();
-  requestRender();
 };
 
-// Zoom function
+// Zoom — pure-distance change. Orientation, target, and up stay current.
 window.zoom = function(factor) {
-  // Calculate direction from target to camera
-  const direction = new THREE.Vector3();
-  direction.subVectors(camera.position, controls.target);
-
-  // Scale the direction by the factor
+  const direction = new THREE.Vector3().subVectors(camera.position, controls.target);
   const newDistance = direction.length() * (1 + factor);
-
-  // Prevent zooming too close or too far
-  const minDistance = modelSize * 0.1;
-  const maxDistance = modelSize * 10;
-
-  if (newDistance >= minDistance && newDistance <= maxDistance) {
-    direction.normalize().multiplyScalar(newDistance);
-    camera.position.copy(controls.target).add(direction);
-    camera.updateProjectionMatrix();
-    requestRender();
-  }
+  if (newDistance < modelSize * 0.1 || newDistance > modelSize * 10) return;
+  direction.normalize().multiplyScalar(newDistance);
+  animateCameraTo({
+    position:   controls.target.clone().add(direction),
+    quaternion: camera.quaternion.clone(),
+    up:         camera.up.clone(),
+    target:     controls.target.clone(),
+  }, ANIM_ZOOM);
 };
 
-// Reset zoom to default distance
+// Reset zoom — animates back to modelSize × 1.5 distance from the current target.
 window.resetZoom = function() {
-  const direction = new THREE.Vector3();
-  direction.subVectors(camera.position, controls.target).normalize();
-  camera.position.copy(controls.target).add(direction.multiplyScalar(modelSize * 1.5));
-  camera.updateProjectionMatrix();
-  requestRender();
+  const direction = new THREE.Vector3()
+    .subVectors(camera.position, controls.target)
+    .normalize()
+    .multiplyScalar(modelSize * 1.5);
+  animateCameraTo({
+    position:   controls.target.clone().add(direction),
+    quaternion: camera.quaternion.clone(),
+    up:         camera.up.clone(),
+    target:     controls.target.clone(),
+  }, ANIM_ZOOM);
 };
 
 
