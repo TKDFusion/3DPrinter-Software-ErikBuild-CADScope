@@ -668,8 +668,10 @@ function loadModel(id) {
   const loadingText = document.getElementById('loadingText');
   const processingLine = document.getElementById('processingLine');
   const processingText = document.getElementById('processingText');
+  const progressFill = document.getElementById('loadingProgressFill');
   overlay.classList.remove('hidden');
   processingLine.classList.add('hidden');
+  progressFill.style.width = '0%';
   loadingText.textContent = 'Retrieving 3D model...';
 
   gltfLoader.load(entry.model, (gltf) => {
@@ -736,6 +738,7 @@ function loadModel(id) {
   }, (progress) => {
     if (progress.total) {
       const pct = Math.min(100, progress.loaded / progress.total * 100).toFixed(0);
+      progressFill.style.width = `${pct}%`;
       loadingText.textContent = `Retrieving 3D model... ${pct}%`;
       if (pct >= 100 && processingLine.classList.contains('hidden')) {
         processingText.textContent = loadingPhrases[Math.floor(Math.random() * loadingPhrases.length)] + '...';
