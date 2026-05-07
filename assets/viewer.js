@@ -120,6 +120,7 @@ let loadGeneration = 0;
 const categoryMeshes = new Map();
 const categoryPickers = new Map();
 let currentColorSet = null;
+let currentLookups = null;
 
 // Selection state for tree-to-3D highlighting
 let selectedObj = null;
@@ -212,18 +213,16 @@ document.getElementById('copyLinkBtn').addEventListener('click', () => {
 });
 
 document.getElementById('resetColorsBtn').addEventListener('click', () => {
-  if (!currentColorSet || !currentModel) return;
-  for (const [name, cat] of Object.entries(currentColorSet.categories)) {
+  if (!currentLookups || !currentModel) return;
+  for (const [name, entry] of currentLookups.palette) {
     const picker = categoryPickers.get(name);
-    if (picker) picker.value = cat.color;
-    const c = new THREE.Color(cat.color);
-    const metalness = cat.metalness ?? 0.0;
-    const opacity = cat.opacity ?? 1.0;
+    if (picker) picker.value = entry.color;
+    const c = new THREE.Color(entry.color);
     (categoryMeshes.get(name) || []).forEach((mesh) => {
       mesh.material.color.copy(c);
-      mesh.material.metalness = metalness;
-      mesh.material.opacity = opacity;
-      mesh.material.transparent = opacity < 1.0;
+      mesh.material.metalness = entry.metalness;
+      mesh.material.opacity = entry.opacity;
+      mesh.material.transparent = entry.opacity < 1.0;
     });
   }
   updateURL();
@@ -246,51 +245,166 @@ function stripNumericSuffix(name) {
   return name.replace(/-\d+$/, '');
 }
 
-function applyDefaultConfiguration(colorSet, model) {
-  const hiddenNames = new Set(colorSet?.defaultConfiguration?.hidden || []);
-  if (hiddenNames.size === 0) return;
-  model.traverse((obj) => {
-    const cleaned = cleanNodeName(obj.name);
-    const stripped = stripNumericSuffix(cleaned);
-    if (hiddenNames.has(cleaned) || hiddenNames.has(stripped)) {
-      obj.visible = false;
-    }
-  });
+// Translate a shell-style glob (* and ?) to an anchored regex.
+function globToRegExp(glob) {
+  const escaped = glob.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const pattern = escaped.replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp('^' + pattern + '$');
 }
 
-function applyColorSet(colorSet, model) {
+// Append a child's cleaned name to a parent path. Empty/nameless components
+// are skipped so JS paths match the scaffold emitted by dump_parts.py.
+function extendPath(parentPath, childName) {
+  const cleaned = cleanNodeName(childName);
+  if (!cleaned) return parentPath;
+  return parentPath ? `${parentPath}/${cleaned}` : cleaned;
+}
+
+// Resolve a sidecar into ready-to-query lookup tables.
+// palette: name -> { color, metalness, opacity, showInPicker }
+// autoAssign: ordered [{ category, regex }] — first match wins
+// nodesByPath: full slash-joined path -> entry
+// nodesByLeaf: bare-leaf key -> entry (legacy/forgiveness path)
+function buildSidecarLookups(colorSet) {
+  const palette = new Map();
+  const autoAssign = [];
+  const nodesByPath = new Map();
+  const nodesByLeaf = new Map();
+
+  if (colorSet?.palette) {
+    for (const [name, raw] of Object.entries(colorSet.palette)) {
+      palette.set(name, {
+        color: raw.color,
+        metalness: raw.metalness ?? 0.0,
+        opacity: raw.opacity ?? 1.0,
+        showInPicker: raw.showInPicker !== false,
+      });
+    }
+  }
+
+  if (Array.isArray(colorSet?.autoAssign)) {
+    for (const rule of colorSet.autoAssign) {
+      if (!rule || !rule.category || !rule.match) continue;
+      if (!palette.has(rule.category)) {
+        console.warn(`Sidecar autoAssign rule references category "${rule.category}" which is not defined in palette.`);
+      }
+      autoAssign.push({ category: rule.category, regex: globToRegExp(rule.match) });
+    }
+  }
+
+  let warnedAboutLeafKeys = false;
+  if (colorSet?.nodes) {
+    for (const [key, entry] of Object.entries(colorSet.nodes)) {
+      if (entry?.category && !palette.has(entry.category)) {
+        console.warn(`Sidecar node "${key}" references category "${entry.category}" which is not defined in palette.`);
+      }
+      if (key.includes('/')) {
+        nodesByPath.set(key, entry);
+      } else {
+        nodesByLeaf.set(key, entry);
+        if (!warnedAboutLeafKeys) {
+          console.warn(`Sidecar uses bare-leaf node keys (e.g. "${key}"). Path-based keys are preferred for unambiguous matching.`);
+          warnedAboutLeafKeys = true;
+        }
+      }
+    }
+  }
+
+  return { palette, autoAssign, nodesByPath, nodesByLeaf };
+}
+
+// Look up the sidecar entry for a node by its path. Tries exact-path first,
+// then falls back to fuzzy-matched bare-leaf keys (cleaned, then -N stripped).
+function lookupNode(lookups, path) {
+  if (!lookups) return null;
+  const direct = lookups.nodesByPath.get(path);
+  if (direct) return direct;
+  if (lookups.nodesByLeaf.size === 0) return null;
+  const leaf = path.includes('/') ? path.substring(path.lastIndexOf('/') + 1) : path;
+  const cleaned = cleanNodeName(leaf);
+  return lookups.nodesByLeaf.get(cleaned)
+      || lookups.nodesByLeaf.get(stripNumericSuffix(cleaned))
+      || null;
+}
+
+// Identify the visual root (skip the glTF "Scene" wrapper if present), matching buildTree.
+function visualRoot(model) {
+  return (model.children.length === 1 && model.name === 'Scene') ? model.children[0] : model;
+}
+
+function applyDefaultConfiguration(lookups, model) {
+  if (!lookups || (lookups.nodesByPath.size === 0 && lookups.nodesByLeaf.size === 0)) return;
+  const root = visualRoot(model);
+  function walk(node, path) {
+    const entry = lookupNode(lookups, path);
+    if (entry?.hidden) node.visible = false;
+    if (node.children) {
+      for (const child of node.children) {
+        walk(child, extendPath(path, child.name));
+      }
+    }
+  }
+  for (const child of root.children) {
+    walk(child, extendPath('', child.name));
+  }
+}
+
+function applyColorSet(lookups, model) {
   categoryMeshes.clear();
 
-  // Build per-category part sets, colors, and material properties
-  const categories = [];
-  for (const [name, cat] of Object.entries(colorSet.categories)) {
-    const partSet = new Set(cat.parts || []);
-    categories.push({ name, partSet, color: new THREE.Color(cat.color), metalness: cat.metalness ?? 0.0, opacity: cat.opacity ?? 1.0 });
+  // Pre-resolve palette into Three.js Color objects keyed by category name.
+  const resolved = new Map();
+  for (const [name, entry] of lookups.palette) {
+    resolved.set(name, {
+      color: new THREE.Color(entry.color),
+      metalness: entry.metalness,
+      opacity: entry.opacity,
+    });
     categoryMeshes.set(name, []);
   }
 
-  // First-match semantics: earlier categories win
-  model.traverse((obj) => {
-    if (!obj.isMesh) return;
+  // Resolve a node's own category (explicit > autoAssign first match > none).
+  function resolveCategory(node, path) {
+    const entry = lookupNode(lookups, path);
+    if (entry?.category) return entry.category;
+    const name = node.name || '';
+    for (const rule of lookups.autoAssign) {
+      if (rule.regex.test(name)) return rule.category;
+    }
+    return null;
+  }
 
-    const cleaned = cleanNodeName(obj.name);
-    const stripped = stripNumericSuffix(cleaned);
-    const parentCleaned = obj.parent ? cleanNodeName(obj.parent.name) : '';
-
-    for (const cat of categories) {
-      if (cat.partSet.has(cleaned) || cat.partSet.has(stripped) || cat.partSet.has(parentCleaned)) {
-        obj.material = obj.material.clone();
-        obj.material.color.copy(cat.color);
-        obj.material.roughness = 0.5;
-        obj.material.metalness = cat.metalness;
-        obj.material.opacity = cat.opacity;
-        obj.material.transparent = cat.opacity < 1.0;
-        obj.material.side = THREE.DoubleSide;
-        categoryMeshes.get(cat.name).push(obj);
-        break;
+  // Top-down walk: each node inherits its nearest ancestor's category if it doesn't define its own.
+  const warnedMissing = new Set();
+  function walk(node, path, inheritedCategory) {
+    const myCategory = resolveCategory(node, path) || inheritedCategory;
+    if (node.isMesh && myCategory) {
+      if (resolved.has(myCategory)) {
+        const cat = resolved.get(myCategory);
+        node.material = node.material.clone();
+        node.material.color.copy(cat.color);
+        node.material.roughness = 0.5;
+        node.material.metalness = cat.metalness;
+        node.material.opacity = cat.opacity;
+        node.material.transparent = cat.opacity < 1.0;
+        node.material.side = THREE.DoubleSide;
+        categoryMeshes.get(myCategory).push(node);
+      } else if (!warnedMissing.has(myCategory)) {
+        warnedMissing.add(myCategory);
+        console.warn(`Sidecar references category "${myCategory}" which is not defined in palette.`);
       }
     }
-  });
+    if (node.children) {
+      for (const child of node.children) {
+        walk(child, extendPath(path, child.name), myCategory);
+      }
+    }
+  }
+
+  const root = visualRoot(model);
+  for (const child of root.children) {
+    walk(child, extendPath('', child.name), null);
+  }
 }
 
 function fetchColorSet(entry) {
@@ -300,15 +414,15 @@ function fetchColorSet(entry) {
     .catch(() => null);
 }
 
-function buildColorPickerUI(colorSet) {
+function buildColorPickerUI(lookups) {
   const colorControls = document.getElementById('colorControls');
   colorControls.innerHTML = '';
   categoryPickers.clear();
   const heading = document.createElement('h3');
   heading.textContent = 'Colors';
   colorControls.appendChild(heading);
-  for (const [name, cat] of Object.entries(colorSet.categories)) {
-    if (cat.visible === false) continue;
+  for (const [name, entry] of lookups.palette) {
+    if (!entry.showInPicker) continue;
 
     const row = document.createElement('div');
     row.className = 'color-row';
@@ -318,7 +432,7 @@ function buildColorPickerUI(colorSet) {
 
     const picker = document.createElement('input');
     picker.type = 'color';
-    picker.value = cat.color;
+    picker.value = entry.color;
 
     // Apply URL override on first load
     if (!urlColorsConsumed && name !== 'model') {
@@ -425,12 +539,14 @@ function loadModel(id) {
       const colorControls = document.getElementById('colorControls');
       if (colorSet) {
         currentColorSet = colorSet;
-        applyDefaultConfiguration(colorSet, currentModel);
-        applyColorSet(colorSet, currentModel);
+        currentLookups = buildSidecarLookups(colorSet);
+        applyDefaultConfiguration(currentLookups, currentModel);
+        applyColorSet(currentLookups, currentModel);
         buildTree(currentModel, entry.name);
-        buildColorPickerUI(colorSet);
+        buildColorPickerUI(currentLookups);
       } else {
         currentColorSet = null;
+        currentLookups = null;
         buildTree(currentModel, entry.name);
         colorControls.style.display = 'none';
       }
@@ -474,6 +590,22 @@ function buildTree(sceneRoot, rootLabel) {
 
   // Map Three.js objects to their tree item DOM elements for syncing
   const objToTreeItem = new Map();
+
+  // Slash-joined cleaned-name path from the visual root (root excluded), with
+  // empty/nameless components skipped to match dump_parts.py's scaffold paths.
+  // Cached per object.
+  const lookups = currentLookups;
+  const pathCache = new WeakMap();
+  function pathOf(obj) {
+    if (pathCache.has(obj)) return pathCache.get(obj);
+    let path = '';
+    if (obj.parent && obj.parent !== root) {
+      path = pathOf(obj.parent);
+    }
+    path = extendPath(path, obj.name);
+    pathCache.set(obj, path);
+    return path;
+  }
 
   function syncTreeItemVisibility(treeItem, visible) {
     const cb = treeItem._checkbox;
@@ -587,7 +719,14 @@ function buildTree(sceneRoot, rootLabel) {
     // Object name — click to highlight in 3D view
     const label = document.createElement('span');
     label.className = 'tree-label';
-    label.textContent = (depth === 0 && rootLabel) ? rootLabel : (obj.name || obj.type || 'Object');
+    const entry = lookups ? lookupNode(lookups, pathOf(obj)) : null;
+    if (entry?.displayName) {
+      label.textContent = entry.displayName;
+    } else if (depth === 0 && rootLabel) {
+      label.textContent = rootLabel;
+    } else {
+      label.textContent = obj.name || obj.type || 'Object';
+    }
     label.addEventListener('click', (e) => {
       e.stopPropagation();
       if (selectedObj === obj) {
