@@ -77,6 +77,7 @@ document.getElementById('brightnessSlider').addEventListener('input', (e) => {
   for (const { light, base } of baseLightIntensities) {
     light.intensity = base * scale;
   }
+  requestRender();
 });
 
 pmrem = new THREE.PMREMGenerator(renderer);
@@ -86,6 +87,21 @@ camera.position.set(0.5, 0.5, 0.5);
 
 controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+
+// Render-on-demand: schedule one render per animation frame; OrbitControls
+// fires 'change' synchronously inside controls.update() while damping is
+// settling, so the natural feedback loop quiesces when the camera stops.
+let renderQueued = false;
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    controls.update();
+    renderer.render(scene, camera);
+  });
+}
+controls.addEventListener('change', requestRender);
 
 // Store model bounds globally for view controls
 let modelCenter = new THREE.Vector3();
@@ -97,6 +113,7 @@ new RGBELoader(loadingManager).load(
       const envMap = pmrem.fromEquirectangular(texture).texture;
       scene.environment = envMap;
       texture.dispose();
+      requestRender();
   },
   (xhr) => {
       if (xhr.total) {
@@ -149,6 +166,7 @@ function highlightObject(obj) {
     savedEmissives.set(child, child.material.emissive.clone());
     child.material.emissive.copy(HIGHLIGHT_COLOR);
   });
+  requestRender();
 }
 
 function unhighlightObject() {
@@ -159,6 +177,7 @@ function unhighlightObject() {
   if (selectedTreeItem) selectedTreeItem.classList.remove('selected');
   selectedObj = null;
   selectedTreeItem = null;
+  requestRender();
 }
 
 // Populate model select from manifest
@@ -289,6 +308,7 @@ document.getElementById('resetColorsBtn').addEventListener('click', () => {
     });
   }
   updateURL();
+  requestRender();
 });
 
 function cleanNodeName(name) {
@@ -515,6 +535,7 @@ function buildColorPickerUI(lookups) {
       const meshes = categoryMeshes.get(name) || [];
       meshes.forEach((mesh) => { mesh.material.color.copy(c); });
       updateURL();
+      requestRender();
     });
 
     row.appendChild(label);
@@ -619,6 +640,7 @@ function loadModel(id) {
       pendingShareState = null;
       updateURL();
       overlay.classList.add('hidden');
+      requestRender();
     });
   }, (progress) => {
     if (progress.total) {
@@ -746,6 +768,7 @@ function buildTree(sceneRoot, rootLabel, pendingState) {
 
     setVisibility(root);
     updateURL();
+    requestRender();
   }
 
   function unisolateAll() {
@@ -765,6 +788,7 @@ function buildTree(sceneRoot, rootLabel, pendingState) {
 
     restoreVisibility(root);
     updateURL();
+    requestRender();
   }
 
   function createTreeItem(obj, parentElement, depth = 0) {
@@ -796,6 +820,7 @@ function buildTree(sceneRoot, rootLabel, pendingState) {
         itemDiv.classList.add('hidden');
       }
       updateURL();
+      requestRender();
     });
     contentDiv.appendChild(checkbox);
     itemDiv._checkbox = checkbox;
@@ -1002,7 +1027,7 @@ window.setView = function(view) {
 
   camera.lookAt(modelCenter);
   camera.updateProjectionMatrix();
-  controls.update();
+  requestRender();
 };
 
 // Zoom function
@@ -1022,6 +1047,7 @@ window.zoom = function(factor) {
     direction.normalize().multiplyScalar(newDistance);
     camera.position.copy(controls.target).add(direction);
     camera.updateProjectionMatrix();
+    requestRender();
   }
 };
 
@@ -1031,15 +1057,13 @@ window.resetZoom = function() {
   direction.subVectors(camera.position, controls.target).normalize();
   camera.position.copy(controls.target).add(direction.multiplyScalar(modelSize * 1.5));
   camera.updateProjectionMatrix();
+  requestRender();
 };
 
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}
-animate();
+// Initial render — every interactive control invalidates via requestRender()
+// from here on, so this is the only unconditional draw.
+requestRender();
 
 window.addEventListener('resize', () => {
   const w = canvas.clientWidth;
@@ -1047,4 +1071,5 @@ window.addEventListener('resize', () => {
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
+  requestRender();
 });
